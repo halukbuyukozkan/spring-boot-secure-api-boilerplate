@@ -9,10 +9,8 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
 import java.time.OffsetDateTime;
-import java.util.Collection;
-import java.util.List;
-import java.util.Objects;
-import java.util.UUID;
+import java.util.*;
+import java.util.stream.Stream;
 
 @Entity
 @Table(name = "users")
@@ -29,9 +27,13 @@ public class User implements UserDetails {
     @Column(name = "password_hash", nullable = false)
     private String passwordHash;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
-    private Role role;
+    @ManyToMany(fetch = FetchType.LAZY)
+    @JoinTable(
+            name = "user_roles",
+            joinColumns = @JoinColumn(name = "user_id"),
+            inverseJoinColumns = @JoinColumn(name = "role_id")
+    )
+    private Set<Role> roles = new HashSet<>();
 
     @Column(nullable = false, updatable = false)
     private OffsetDateTime createdAt;
@@ -39,11 +41,11 @@ public class User implements UserDetails {
     @Column(nullable = false)
     private OffsetDateTime updatedAt;
 
-    public User(String email, String passwordHash, Role role) {
+    public User(String email, String passwordHash, Set<Role> roles) {
         this.id = UUID.randomUUID();
         this.email = email;
         this.passwordHash = passwordHash;
-        this.role = role;
+        this.roles = new HashSet<>(roles);
     }
 
     @PrePersist
@@ -59,7 +61,13 @@ public class User implements UserDetails {
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority("ROLE_" + role.name()));
+        return roles.stream()
+                .flatMap(role -> Stream.concat(
+                        Stream.of(new SimpleGrantedAuthority("ROLE_" + role.getName())),
+                        role.getPermissions().stream()
+                                .map(p -> new SimpleGrantedAuthority(p.getName()))
+                ))
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     @Override
@@ -94,12 +102,8 @@ public class User implements UserDetails {
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
         User user = (User) o;
         return Objects.equals(id, user.id);
     }

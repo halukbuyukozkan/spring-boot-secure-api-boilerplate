@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 
 import javax.crypto.SecretKey;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Date;
 import java.util.List;
 import java.util.function.Function;
@@ -51,25 +52,35 @@ public class JwtService {
     }
 
     public String generateAccessToken(UserDetails userDetails) {
-        return buildToken(userDetails, accessTokenExpiration);
+        return buildToken(userDetails.getUsername(), toRoleStrings(userDetails.getAuthorities()), accessTokenExpiration);
     }
 
     public String generateRefreshToken(UserDetails userDetails) {
-        return buildToken(userDetails, refreshTokenExpiration);
+        return buildToken(userDetails.getUsername(), toRoleStrings(userDetails.getAuthorities()), refreshTokenExpiration);
     }
 
-    private String buildToken(UserDetails userDetails, long expiration) {
-        List<String> roles = userDetails.getAuthorities().stream()
-                .map(GrantedAuthority::getAuthority)
-                .toList();
+    public String generateAccessToken(String email, List<? extends GrantedAuthority> authorities) {
+        return buildToken(email, toRoleStrings(authorities), accessTokenExpiration);
+    }
 
+    public String generateRefreshToken(String email, List<? extends GrantedAuthority> authorities) {
+        return buildToken(email, toRoleStrings(authorities), refreshTokenExpiration);
+    }
+
+    private String buildToken(String email, List<String> roles, long expiration) {
         return Jwts.builder()
-                .subject(userDetails.getUsername())
-                .claim("roles", roles)
+                .subject(email)
+                .claim("authorities", roles)
                 .issuedAt(new Date())
                 .expiration(new Date(System.currentTimeMillis() + expiration))
                 .signWith(signingKey, Jwts.SIG.HS256)
                 .compact();
+    }
+
+    private List<String> toRoleStrings(Collection<? extends GrantedAuthority> authorities) {
+        return authorities.stream()
+                .map(GrantedAuthority::getAuthority)
+                .toList();
     }
 
     public String extractUsername(String token) {
@@ -94,7 +105,7 @@ public class JwtService {
     }
 
     public List<SimpleGrantedAuthority> extractAuthorities(String token) {
-        Object rolesClaim = extractClaim(token, claims -> claims.get("roles"));
+        Object rolesClaim = extractClaim(token, claims -> claims.get("authorities"));
         if (!(rolesClaim instanceof List<?> roles)) {
             return List.of();
         }

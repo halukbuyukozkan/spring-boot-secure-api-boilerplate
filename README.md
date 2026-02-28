@@ -1,14 +1,43 @@
-# Boilerplate
+# Spring Boot Boilerplate
 
-Bu proje Spring Boot + PostgreSQL + Flyway + JWT auth içerir ve Docker ile
-kolayca ayağa kalkar. Bu doküman en basit kullanım akışını anlatır.
+Production-ready Spring Boot başlangıç şablonu. JWT kimlik doğrulama, Role-Permission yetkilendirme, PostgreSQL, Flyway migration ve Docker altyapısı hazır olarak gelir.
 
-## Gereksinimler
+## Teknoloji Yığını
+
+| Katman | Teknoloji |
+|---|---|
+| Runtime | Java 21 |
+| Framework | Spring Boot 3.4.1 |
+| Güvenlik | Spring Security + JWT (jjwt 0.12.6) |
+| Veritabanı | PostgreSQL 16 |
+| Migration | Flyway |
+| ORM | Spring Data JPA (Hibernate) |
+| Dokümantasyon | SpringDoc OpenAPI (Swagger UI) |
+| Yardımcı | Lombok |
+| Konteyner | Docker + Docker Compose |
+
+---
+
+## Hızlı Başlangıç
+
+### Gereksinimler
 
 - Docker Desktop
-- Docker Compose
 
-## Hızlı Başlangıç (Docker)
+### 1. Ortam dosyasını oluştur
+
+```bash
+cp .env.example .env
+```
+
+`.env` dosyasını aç ve değerleri doldur. En az `JWT_SECRET` değerini değiştir:
+
+```bash
+# Güvenli secret üretmek için:
+openssl rand -base64 32
+```
+
+### 2. Uygulamayı başlat
 
 ```bash
 docker-compose up --build
@@ -20,132 +49,272 @@ Arka planda çalıştırmak için:
 docker-compose up -d --build
 ```
 
-Durdurmak için:
+### 3. Hazır
 
-```bash
-docker-compose down
+| Servis | URL |
+|---|---|
+| API | http://localhost:8080 |
+| Swagger UI | http://localhost:8080/swagger-ui.html |
+| pgAdmin | http://localhost:5050 |
+
+> **Not:** Flyway migration'ları uygulama ayağa kalkarken otomatik çalışır.  
+> Roller ve permission'lar seed migration'ı ile DB'ye otomatik eklenir.
+
+---
+
+## Auth Endpointleri
+
+Tüm endpointler Swagger UI üzerinden interaktif olarak test edilebilir.
+
+### Kayıt
+
+```http
+POST /api/auth/register
+Content-Type: application/json
+
+{
+  "email": "user@example.com",
+  "password": "123456"
+}
 ```
 
-Not: `docker-compose down -v` komutu veritabanı verilerini de siler.
+### Giriş
 
-## Servisler
+```http
+POST /api/auth/login
+Content-Type: application/json
 
-- Uygulama: `http://localhost:8080`
-- Swagger UI: `http://localhost:8080/swagger-ui.html`
-- pgAdmin: `http://localhost:5050`
+{
+  "email": "user@example.com",
+  "password": "123456"
+}
+```
 
-## Veritabanını Görme/Yönetme (pgAdmin)
+**Yanıt:**
 
-1. Tarayıcıdan pgAdmin'e girin: `http://localhost:5050`
-2. Giriş:
-   - Email: `admin@admin.com`
-   - Password: `admin`
-3. Sunucu ekleyin:
-   - Name: `Boilerplate DB`
-   - Host name/address: `database` (Docker içinden) veya `localhost` (host makineden)
-   - Port: `5432`
-   - Maintenance database: `boilerplate`
-   - Username: `postgres`
-   - Password: `secret123`
-4. Tabloları görmek için:
-   - `Servers` → `Boilerplate DB` → `Databases` → `boilerplate` → `Schemas` → `public` → `Tables`
+```json
+{
+  "accessToken": "eyJhbGci...",
+  "refreshToken": "eyJhbGci..."
+}
+```
 
-## CLI ile Veritabanı Görme
+### Token Yenileme
+
+```http
+POST /api/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "eyJhbGci..."
+}
+```
+
+### Korumalı Endpoint (örnek)
+
+```http
+GET /api/demo
+Authorization: Bearer eyJhbGci...
+```
+
+---
+
+## Güvenlik Mimarisi
+
+### JWT — Stateless Akış
+
+Her istekte veritabanına gidilmez. Token içine `authorities` claim'i gömülür ve filtre yalnızca imzayı doğrular.
+
+```
+İstek gelir
+  └─ JwtAuthenticationFilter
+       ├─ İmza + expiry doğrula          (DB yok)
+       ├─ authorities claim'den çek      (DB yok)
+       └─ SecurityContext'e set et
+```
+
+**Token içeriği:**
+
+```json
+{
+  "sub": "user@example.com",
+  "authorities": ["ROLE_USER", "users:read"],
+  "iat": 1700000000,
+  "exp": 1700900000
+}
+```
+
+| Token | Süre |
+|---|---|
+| Access Token | 15 dakika (900 000 ms) |
+| Refresh Token | 7 gün (604 800 000 ms) |
+
+### Role-Permission Modeli
+
+```
+users  ──< user_roles >── roles ──< role_permissions >── permissions
+```
+
+**Seed edilen varsayılan roller ve yetkiler:**
+
+| Permission | USER | ADMIN |
+|---|:---:|:---:|
+| `users:read` | ✅ | ✅ |
+| `users:write` | — | ✅ |
+| `users:delete` | — | ✅ |
+| `admin:access` | — | ✅ |
+
+Yeni permission eklemek için `V2__seed_roles_and_permissions.sql` dosyasına `INSERT` satırı ekle veya yeni bir migration yaz.
+
+Endpoint'e permission kontrolü eklemek için `@PreAuthorize` kullan:
+
+```java
+@PreAuthorize("hasAuthority('users:write')")
+@PostMapping("/users")
+public ResponseEntity<?> createUser(...) { ... }
+
+@PreAuthorize("hasRole('ADMIN')")
+@DeleteMapping("/users/{id}")
+public ResponseEntity<?> deleteUser(...) { ... }
+```
+
+### Hata Yanıt Formatı
+
+Tüm hatalar standart bir JSON formatında döner:
+
+```json
+{
+  "status": 409,
+  "error": "Conflict",
+  "message": "Email already in use: user@example.com",
+  "path": "/api/auth/register",
+  "timestamp": "2026-02-28T10:00:00Z"
+}
+```
+
+| Durum | HTTP Kodu |
+|---|---|
+| Validation hatası | 400 |
+| Geçersiz kimlik bilgisi | 401 |
+| Geçersiz / süresi dolmuş token | 401 |
+| Yetkisiz erişim | 403 |
+| Email zaten kayıtlı | 409 |
+| Beklenmedik hata | 500 |
+
+---
+
+## Proje Yapısı
+
+```
+src/main/java/com/buyukozkan/boilerplate/
+├── config/
+│   ├── OpenApiConfig.java          # Swagger/OpenAPI + BearerAuth tanımı
+│   └── SecurityConfig.java         # Stateless security, JWT filter, whitelist
+├── controller/
+│   ├── AuthController.java         # /api/auth/register, /login, /refresh
+│   └── DemoController.java         # Korumalı endpoint örneği
+├── dto/
+│   ├── AuthResponse.java           # accessToken + refreshToken yanıtı
+│   ├── ErrorResponse.java          # Standart hata yanıtı
+│   ├── LoginRequest.java
+│   ├── RefreshTokenRequest.java
+│   └── RegisterRequest.java
+├── entity/
+│   ├── Permission.java             # permissions tablosu
+│   ├── Role.java                   # roles tablosu (permissions ile ManyToMany)
+│   └── User.java                   # users tablosu (roles ile ManyToMany)
+├── exception/
+│   ├── DuplicateEmailException.java
+│   ├── GlobalExceptionHandler.java # @RestControllerAdvice — merkezi hata yönetimi
+│   └── InvalidTokenException.java
+├── repository/
+│   ├── PermissionRepository.java
+│   ├── RoleRepository.java         # findByNameWithPermissions (JOIN FETCH)
+│   └── UserRepository.java         # findByEmailWithRolesAndPermissions (JOIN FETCH)
+├── security/
+│   └── JwtAuthenticationFilter.java  # DB'ye gitmeden token doğrulama
+└── service/
+    ├── AuthService.java            # register / login / refreshToken
+    ├── JwtService.java             # token üretimi, doğrulama, claim okuma
+    └── UserDetailsServiceImpl.java # Spring Security UserDetailsService impl
+
+src/main/resources/
+├── db/migration/
+│   ├── V1__init_schema.sql         # Tüm tablolar
+│   └── V2__seed_roles_and_permissions.sql  # Başlangıç rol/permission verileri
+└── application.yml
+```
+
+---
+
+## Veritabanı Yönetimi (pgAdmin)
+
+1. http://localhost:5050 adresini aç
+2. Giriş: `.env` dosyasındaki `PGADMIN_DEFAULT_EMAIL` ve `PGADMIN_DEFAULT_PASSWORD`
+3. Yeni sunucu ekle:
+   - **Host:** `database`
+   - **Port:** `5432`
+   - **Database:** `.env` → `POSTGRES_DB`
+   - **Username:** `.env` → `POSTGRES_USER`
+   - **Password:** `.env` → `POSTGRES_PASSWORD`
+
+### CLI ile bağlan
 
 ```bash
 docker-compose exec database psql -U postgres -d boilerplate
 ```
 
-Örnek tablo listesi:
-
 ```sql
+-- Tabloları listele
 \dt
+
+-- Rolleri gör
+SELECT * FROM roles;
+
+-- Permission'ları gör
+SELECT r.name AS role, p.name AS permission
+FROM roles r
+JOIN role_permissions rp ON r.id = rp.role_id
+JOIN permissions p ON p.id = rp.permission_id
+ORDER BY r.name, p.name;
 ```
 
-## Kalıcılık (Volume)
+---
 
-Veritabanı verileri `database-data` volume'unda saklanır. Bu yüzden:
+## Ortam Değişkenleri
 
-- `docker-compose down` → veriler korunur
-- `docker-compose down -v` → veriler silinir
+| Değişken | Açıklama |
+|---|---|
+| `POSTGRES_USER` | PostgreSQL kullanıcı adı |
+| `POSTGRES_PASSWORD` | PostgreSQL şifresi |
+| `POSTGRES_DB` | Veritabanı adı |
+| `SPRING_DATASOURCE_URL` | JDBC bağlantı URL'i |
+| `SPRING_DATASOURCE_USERNAME` | Uygulama DB kullanıcısı |
+| `SPRING_DATASOURCE_PASSWORD` | Uygulama DB şifresi |
+| `JWT_SECRET` | Base64 encoded, min 32 byte |
+| `PGADMIN_DEFAULT_EMAIL` | pgAdmin giriş e-postası |
+| `PGADMIN_DEFAULT_PASSWORD` | pgAdmin giriş şifresi |
 
-pgAdmin ayarları `pgadmin-data` volume'unda saklanır.
+---
 
-## Projede Eklenen Dosyalar ve Amaçları
+## Komutlar
 
-Aşağıdaki bölümde bu projede eklenen/her biri güncellenen dosyaların amacı
-kısa ve net şekilde anlatılmıştır. Bu liste özellikle JWT auth ve OpenAPI
-akışını anlamak için rehber niteliğindedir.
+```bash
+# Başlat
+docker-compose up --build
 
-### Kimlik Doğrulama (JWT) ile İlgili Dosyalar
+# Arka planda başlat
+docker-compose up -d --build
 
-- `src/main/java/com/buyukozkan/boilerplate/service/JwtService.java`  
-  JWT üretimi, doğrulama ve claim çıkarma işlemleri.
-- `src/main/java/com/buyukozkan/boilerplate/security/JwtAuthenticationFilter.java`  
-  Her istekte `Authorization: Bearer ...` header’ını okuyup token doğrular.
-- `src/main/java/com/buyukozkan/boilerplate/service/UserDetailsServiceImpl.java`  
-  Email ile kullanıcıyı yükler ve Spring Security’ye `UserDetails` döner.
-- `src/main/java/com/buyukozkan/boilerplate/config/SecurityConfig.java`  
-  Stateless security, JWT filter, Swagger izinleri ve auth provider ayarları.
-- `src/main/java/com/buyukozkan/boilerplate/controller/AuthController.java`  
-  `/api/auth/register`, `/api/auth/login`, `/api/auth/refresh` endpoint’leri.
-- `src/main/java/com/buyukozkan/boilerplate/dto/LoginRequest.java`  
-  Login request DTO’su.
-- `src/main/java/com/buyukozkan/boilerplate/dto/RegisterRequest.java`  
-  Register request DTO’su.
-- `src/main/java/com/buyukozkan/boilerplate/dto/RefreshTokenRequest.java`  
-  Refresh token request DTO’su.
-- `src/main/java/com/buyukozkan/boilerplate/dto/AuthResponse.java`  
-  Access + refresh token response DTO’su.
+# Durdur (veriler korunur)
+docker-compose down
 
-### Kullanıcı Modeli ile İlgili Dosyalar
+# Durdur + verileri sil
+docker-compose down -v
 
-- `src/main/java/com/buyukozkan/boilerplate/entity/User.java`  
-  Kullanıcı entity’si (email, password, role vb).
-- `src/main/java/com/buyukozkan/boilerplate/entity/Role.java`  
-  Kullanıcı rol enum’u (`USER`, `ADMIN`).
-- `src/main/java/com/buyukozkan/boilerplate/repository/UserRepository.java`  
-  `User` için JPA repository.
+# Logları takip et
+docker-compose logs -f app
 
-### OpenAPI (Swagger) ile İlgili Dosyalar
-
-- `src/main/java/com/buyukozkan/boilerplate/config/OpenApiConfig.java`  
-  Swagger/OpenAPI tanımı ve JWT bearer ayarı.
-
-### Veritabanı ve Flyway
-
-- `src/main/resources/db/migration/V1__create_users.sql`  
-  İlk kullanıcı tablosu migration’ı.
-- `src/main/resources/db/migration/V2__add_role_to_users.sql`  
-  Kullanıcıya `role` alanı ekleyen migration.
-- `src/main/resources/application.yml`  
-  DB bağlantısı, Flyway, JWT ve Swagger ayarları.
-
-### Docker
-
-- `docker-compose.yml`  
-  Uygulama + PostgreSQL + pgAdmin servisleri.
-- `Dockerfile`  
-  Maven ile build ve runtime image.
-
-## Olmazsa Olmaz Dosyalar
-
-Bu dosyalar olmadan proje ayağa kalkmaz veya auth çalışmaz:
-
-- `pom.xml` (tüm bağımlılıklar)
-- `Dockerfile`
-- `docker-compose.yml`
-- `src/main/resources/application.yml`
-- `src/main/resources/db/migration/V1__create_users.sql`
-- `src/main/java/com/buyukozkan/boilerplate/entity/User.java`
-- `src/main/java/com/buyukozkan/boilerplate/entity/Role.java`
-- `src/main/java/com/buyukozkan/boilerplate/repository/UserRepository.java`
-- `src/main/java/com/buyukozkan/boilerplate/service/JwtService.java`
-- `src/main/java/com/buyukozkan/boilerplate/security/JwtAuthenticationFilter.java`
-- `src/main/java/com/buyukozkan/boilerplate/service/UserDetailsServiceImpl.java`
-- `src/main/java/com/buyukozkan/boilerplate/config/SecurityConfig.java`
-- `src/main/java/com/buyukozkan/boilerplate/controller/AuthController.java`
-
-Swagger kullanımı için gerekli (isteğe bağlı):
-
-- `src/main/java/com/buyukozkan/boilerplate/config/OpenApiConfig.java`
+# Yeniden build et (kod değişikliği sonrası)
+docker-compose up --build app
+```
